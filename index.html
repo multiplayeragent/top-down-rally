@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Top-Down Rally</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #4f9a3f; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #fff; user-select: none; -webkit-user-select: none; }
+  canvas#game { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 2px 4px #0009; font-weight: 800; }
+  #pos { top: max(12px, env(safe-area-inset-top)); left: max(16px, env(safe-area-inset-left)); font-size: 40px; line-height: 1; }
+  #pos small { font-size: 18px; opacity: .85; }
+  #lap { top: calc(max(12px, env(safe-area-inset-top)) + 46px); left: max(16px, env(safe-area-inset-left)); font-size: 15px; font-variant-numeric: tabular-nums; }
+  #map { position: fixed; top: max(12px, env(safe-area-inset-top)); right: max(14px, env(safe-area-inset-right)); width: 120px; height: 90px; pointer-events: none;
+         border-radius: 10px; background: #0003; }
+  #net { bottom: max(10px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; opacity: .85; white-space: nowrap; }
+  .touch #net { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 168px); }
+  #count { inset: 0; display: grid; place-items: center; font-size: min(26vw, 170px); color: #ffd23f; -webkit-text-stroke: 4px #6a2c00; }
+  #msg { top: 28%; left: 0; right: 0; text-align: center; font-size: 22px; padding: 0 16px; }
+  #hint { bottom: calc(max(12px, env(safe-area-inset-bottom)) + 30px); left: 0; right: 0; text-align: center; font-size: 15px; padding: 0 16px; transition: opacity .8s; }
+  .touch #hint { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 205px); }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0006; }
+  #over[hidden], .pad[hidden] { display: none; }
+  .card { width: min(380px, 90vw); max-height: 80vh; overflow: auto; padding: 20px; border-radius: 16px; background: #1f2a1c; border: 1px solid #ffffff2a; }
+  .card h2 { margin: 0 0 8px; font-size: 22px; }
+  .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffd23f; }
+  .card ol { margin: 0; padding-left: 24px; font-size: 14px; }
+  .card li span { float: right; font-variant-numeric: tabular-nums; }
+  .card li.me { color: #ffd23f; font-weight: 700; }
+  .card p { margin: 12px 0 0; font-size: 13px; opacity: .8; }
+  .pad { position: fixed; bottom: max(16px, env(safe-area-inset-bottom)); display: flex; gap: 12px; }
+  .pad button { width: 76px; height: 76px; border-radius: 50%; border: 2px solid #ffffff99; background: #00000033; color: #fff; font: 800 15px system-ui, sans-serif; touch-action: none; }
+  .pad button.on { background: #ffffff55; }
+  #padL { left: max(16px, env(safe-area-inset-left)); } #padR { right: max(16px, env(safe-area-inset-right)); }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="pos"></div>
+<div class="hud" id="lap"></div>
+<canvas id="map"></canvas>
+<div class="hud" id="net">Connecting…</div>
+<div class="hud" id="count"></div>
+<div class="hud" id="msg"></div>
+<div class="hud" id="hint"></div>
+<div class="pad" id="padL" hidden><button data-k="left">◀</button><button data-k="right">▶</button></div>
+<div class="pad" id="padR" hidden><button data-k="brake">BRAKE</button><button data-k="drift">DRIFT</button></div>
+<div id="over" hidden><div class="card">
+  <h2 id="overTitle">Results</h2><ol id="results"></ol>
+  <h3 id="boardTitle">Best laps on this track</h3><ol id="board"><li>Loading…</li></ol>
+  <p id="next"></p>
+</div></div>
+<script>
+/* ═══ TOP-DOWN RALLY · a Multiplayer Agent starter ═════════════════════════════════════
+ * Tiny cars and tight corners. Versus, 2–6 players; bots fill empty seats.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ laps, car handling, timers, bots, and the TRACKS (add your own)
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   TRACK ......... turning a track's points into a road, curbs, trees and grid boxes
+ *   RACE (HOST) ... the race phases (grid, race, done) and the bots. Only the host writes these.
+ *   MY CAR ........ driving, drifting, laps. Each player writes only its own car.
+ *   DRAW .......... camera, skid marks, dust, cars, minimap, engine sound
+ *   HUD & RESULTS . position, laps, countdown, results, leaderboard
+ *   INPUT ......... keyboard and touch
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player writes its OWN entity: `car` (one packed JSON field: position, heading,
+ *     lap, progress, finish time, sliding) about 15 times a second, `hb` (heartbeat) once
+ *     a second, and `n`/`c` (name, color) once.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s),
+ *     worked out every frame. Only the host writes the shared fields `race` (id, v, phase,
+ *     track, start and end times, results) and `bots`. A new host adopts both from state.
+ *   - A new race starts only when the host bumps race.id (on the next track); every client
+ *     then resets to its grid box. Someone who joins mid-race starts from the line.
+ *   - No intents are needed: laps and finish times are each driver's own facts.
+ *   - Bots are rubber-banded: they speed up when they're behind the people and ease off ahead.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "best-lap-<track>": each player's fastest lap on that track (stored as
+ *     600000 - ms, so higher is better), shown on the results card.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  laps: 3,
+  seats: 6,            // bots fill the race up to this many cars
+  vmax: 330,           // top speed, px/s
+  accel: 300, brake: 520,
+  turn: 3.4,           // steering, rad/s
+  grip: 9,             // how fast sideways sliding stops (higher = grippier)
+  driftGrip: 2.2,      // grip while you hold Drift
+  offroad: 0.5,        // top speed multiplier on the grass
+  boost: 1.3,          // top speed multiplier after a long drift
+  runoff: 110,         // px of grass beside the road before the tire wall
+  countdown: 4000,     // ms on the grid before GO
+  afterFirst: 20000,   // ms the race stays open after the first finisher
+  resultsFor: 9000,    // ms the results show before the next race
+  botSkill: [0.86, 0.95], // bots drive at this share of their best pace
+  board: "best-lap",   // leaderboard name prefix; each track gets its own board
+  // The tracks, raced in turn. points: where the middle of the road passes (it loops back to the first); width in px.
+  tracks: [
+    { key: "oval", name: "Sunny Oval", width: 92, points: [[480, 205], [920, 210], [1160, 310], [1260, 500], [1160, 700], [880, 760], [730, 640], [580, 760], [330, 720], [220, 470], [310, 270]] },
+    { key: "kidney", name: "Kidney Bean", width: 90, points: [[560, 215], [900, 210], [1110, 260], [1260, 460], [1110, 680], [840, 610], [660, 700], [690, 860], [400, 880], [210, 660], [270, 330]] },
+    { key: "hairpins", name: "Hairpin Hills", width: 86, points: [[420, 195], [800, 170], [1180, 200], [1300, 360], [1060, 450], [760, 420], [640, 520], [900, 600], [1260, 640], [1240, 840], [720, 880], [240, 830], [140, 560], [190, 280]] },
+  ],
+};
+const BOT_NAMES = ["Dusty", "Skids", "Turbo", "Gravel", "Nitro", "Mudflap", "Rally"];
+const COLORS = ["#ff4d4d", "#4da6ff", "#ffd23f", "#b06cff", "#ff8c42", "#ff6fb5", "#3de0d0", "#f5f5f5"];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'top-down-rally',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+if (ATTRACT) Object.assign(CONFIG, { countdown: 1500, resultsFor: 1500 });
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A JSON field (shared, or "id/field" on a player), parsed once per change (read-only). */
+function cached(key, raw) { const m = memo.get(key); if (m && m.raw === raw) return m.v; const v = parse(raw, null); memo.set(key, { raw, v }); return v; }
+let net = null, S = { entities: { players: {} }, shared: {} };
+const seenHb = new Map();
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+
+// ── TRACK ───────────────────────────────────────────────────────────────────────────
+const N = 600; // points along every track
+let TR = null; // the track being raced: { k, def, P, T, L, K, maxV, len, half, canvas, skid, ox, oy }
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+/** Build track k (if it isn't built yet): a smooth loop through its points, cut into N evenly spaced points. */
+function useTrack(k) {
+  k = ((k | 0) % CONFIG.tracks.length + CONFIG.tracks.length) % CONFIG.tracks.length;
+  if (TR && TR.k === k) return;
+  const def = CONFIG.tracks[k], pts = def.points, dense = [];
+  for (let i = 0; i < pts.length; i++) { // Catmull-Rom through the points
+    const p0 = pts[(i - 1 + pts.length) % pts.length], p1 = pts[i], p2 = pts[(i + 1) % pts.length], p3 = pts[(i + 2) % pts.length];
+    for (let s = 0; s < 30; s++) {
+      const t = s / 30, t2 = t * t, t3 = t2 * t;
+      const at = (a) => 0.5 * (2 * p1[a] + (-p0[a] + p2[a]) * t + (2 * p0[a] - 5 * p1[a] + 4 * p2[a] - p3[a]) * t2 + (-p0[a] + 3 * p1[a] - 3 * p2[a] + p3[a]) * t3);
+      dense.push({ x: at(0), y: at(1) });
+    }
+  }
+  const cum = [0];
+  for (let i = 1; i <= dense.length; i++) cum.push(cum[i - 1] + Math.hypot(dense[i % dense.length].x - dense[i - 1].x, dense[i % dense.length].y - dense[i - 1].y));
+  const len = cum[dense.length], P = [];
+  for (let i = 0, j = 0; i < N; i++) {
+    const s = (i / N) * len; while (cum[j + 1] < s) j++;
+    const a = dense[j], b = dense[(j + 1) % dense.length], f = (s - cum[j]) / (cum[j + 1] - cum[j]);
+    P.push({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
+  }
+  const T = P.map((p, i) => { const a = P[(i - 1 + N) % N], b = P[(i + 1) % N], d = Math.hypot(b.x - a.x, b.y - a.y); return { x: (b.x - a.x) / d, y: (b.y - a.y) / d }; });
+  const L = T.map((t) => ({ x: -t.y, y: t.x }));
+  const K = T.map((t, i) => { const u = T[(i + 8) % N]; return Math.atan2(t.x * u.y - t.y * u.x, t.x * u.x + t.y * u.y); }); // how much the road turns just ahead
+  const maxV = K.map((c) => CONFIG.vmax * Math.max(0.42, Math.min(1, 1.12 - Math.abs(c) * 2.4)));
+  TR = { k, def, P, T, L, K, maxV, len, half: def.width / 2 };
+  paintTrack(TR);
+}
+
+/** Paint the track once onto its own canvas: grass, curbs, road, start line, grid boxes, trees. */
+function paintTrack(tr) {
+  const xs = tr.P.map((p) => p.x), ys = tr.P.map((p) => p.y), m = 320;
+  tr.ox = Math.floor(Math.min(...xs) - m); tr.oy = Math.floor(Math.min(...ys) - m);
+  const w = Math.ceil(Math.max(...xs) + m - tr.ox), h = Math.ceil(Math.max(...ys) + m - tr.oy);
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const g = c.getContext("2d"), rand = mulberry32(tr.k + 11);
+  g.translate(-tr.ox, -tr.oy);
+  mowedStripes(g, tr.ox, tr.oy, w, h);
+  for (let i = 0; i < 1400; i++) { g.fillStyle = rand() < 0.5 ? "#4e9a3d" : "#66b955"; g.fillRect(tr.ox + rand() * w, tr.oy + rand() * h, 3, 3); }
+  const road = () => { g.beginPath(); tr.P.forEach((p, i) => (i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y))); g.closePath(); };
+  g.lineJoin = "round"; g.lineCap = "round";
+  road(); g.strokeStyle = "#c9b48a"; g.lineWidth = tr.half * 2 + 46; g.stroke();                 // a sandy edge
+  road(); g.strokeStyle = "#e23b3b"; g.lineWidth = tr.half * 2 + 14; g.stroke();                 // curbs
+  g.lineCap = "butt"; road(); g.strokeStyle = "#ffffff"; g.setLineDash([16, 16]); g.stroke(); g.setLineDash([]); g.lineCap = "round";
+  const noise = document.createElement("canvas"); noise.width = noise.height = 64;
+  const n = noise.getContext("2d"); n.fillStyle = "#53565e"; n.fillRect(0, 0, 64, 64);
+  for (let i = 0; i < 260; i++) { n.fillStyle = rand() < 0.5 ? "#5d6069" : "#4a4d54"; n.fillRect(rand() * 64, rand() * 64, 2, 2); }
+  road(); g.strokeStyle = g.createPattern(noise, "repeat"); g.lineWidth = tr.half * 2; g.stroke();  // asphalt
+  g.lineCap = "butt"; road(); g.strokeStyle = "#ffffff66"; g.lineWidth = 3; g.setLineDash([22, 28]); g.stroke(); g.setLineDash([]);
+  // start line: a checkered strip across the road
+  const p0 = tr.P[0], t0 = tr.T[0], l0 = tr.L[0];
+  for (let a = -tr.half; a < tr.half; a += 8) for (let b = 0; b < 3; b++) {
+    g.fillStyle = (Math.round((a + tr.half) / 8) + b) % 2 ? "#111" : "#fff";
+    const x = p0.x + l0.x * a + t0.x * (b * 6 - 9), y = p0.y + l0.y * a + t0.y * (b * 6 - 9);
+    g.save(); g.translate(x, y); g.rotate(Math.atan2(t0.y, t0.x)); g.fillRect(0, 0, 6, 8); g.restore();
+  }
+  for (let s = 0; s < CONFIG.seats + 2; s++) { // grid boxes
+    const q = gridSlot(s, tr); g.save(); g.translate(q.x, q.y); g.rotate(q.h); g.strokeStyle = "#ffffffaa"; g.lineWidth = 2; g.strokeRect(-15, -10, 30, 20); g.restore();
+  }
+  // trees and tire stacks, kept off the road (the same for everyone: seeded)
+  for (let placed = 0, tries = 0; placed < 90 && tries < 4000; tries++) {
+    const x = tr.ox + rand() * w, y = tr.oy + rand() * h, d = Math.min(...tr.P.map((p) => Math.hypot(p.x - x, p.y - y)));
+    if (d < tr.half + CONFIG.runoff + 30) continue;
+    const r = 14 + rand() * 14;
+    g.fillStyle = "#0003"; g.beginPath(); g.arc(x + 6, y + 7, r, 0, Math.PI * 2); g.fill();
+    g.fillStyle = "#2f7d32"; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+    g.fillStyle = "#43a047"; g.beginPath(); g.arc(x - r * 0.25, y - r * 0.3, r * 0.6, 0, Math.PI * 2); g.fill();
+    placed++;
+  }
+  for (let i = 0; i < N; i += 3) { // tire walls on the outside of the sharpest corners
+    if (Math.abs(tr.K[i]) < 0.3) continue;
+    const side = tr.K[i] > 0 ? -1 : 1;
+    for (const d of [tr.half + CONFIG.runoff - 4, tr.half + CONFIG.runoff + 10]) {
+      const x = tr.P[i].x + tr.L[i].x * d * side, y = tr.P[i].y + tr.L[i].y * d * side;
+      g.fillStyle = "#222"; g.beginPath(); g.arc(x, y, 7, 0, Math.PI * 2); g.fill(); g.fillStyle = "#4a4a4a"; g.beginPath(); g.arc(x, y, 3, 0, Math.PI * 2); g.fill();
+    }
+  }
+  tr.canvas = c;
+  tr.skid = document.createElement("canvas"); tr.skid.width = w; tr.skid.height = h; // skid marks pile up here during a race
+}
+
+/** Grass in 60px stripes, lined up in world space so the track canvas and the grass around it match. */
+function mowedStripes(g, x0, y0, w, h) {
+  for (let x = Math.floor(x0 / 60) * 60; x < x0 + w; x += 60) { g.fillStyle = Math.floor(x / 60) % 2 ? "#57a445" : "#5cae4a"; g.fillRect(x, y0, 60, h); }
+}
+
+/** Nearest track point to (x, y), searching near `hint` first. */
+function nearest(x, y, hint) {
+  let best = 0, bd = Infinity;
+  const scan = (from, to) => { for (let j = from; j <= to; j++) { const k = ((j % N) + N) % N, d = (TR.P[k].x - x) ** 2 + (TR.P[k].y - y) ** 2; if (d < bd) { bd = d; best = k; } } };
+  if (hint >= 0) scan(hint - 25, hint + 25);
+  if (hint < 0 || bd > 60 * 60) scan(0, N - 1);
+  return { i: best, d: Math.sqrt(bd) };
+}
+/** Grid box `n` behind the start line, two by two. */
+function gridSlot(n, tr = TR) {
+  const step = tr.len / N, back = (N - Math.round((30 + Math.floor(n / 2) * 36) / step)) % N, side = (n % 2 ? -1 : 1) * tr.half * 0.42;
+  return { x: tr.P[back].x + tr.L[back].x * side, y: tr.P[back].y + tr.L[back].y * side, h: Math.atan2(tr.T[0].y, tr.T[0].x), i: back };
+}
+
+// ── RACE (HOST) ─────────────────────────────────────────────────────────────────────
+const host = { bots: new Map(), wasHost: false, lastBots: 0, raceId: 0, last: null };
+/** The race as state has it, or the host's own newer write that hasn't come back yet. `v` only goes up. */
+function race() {
+  const r = cached("race", S.shared.race);
+  return host.last && isHost() && (!r || host.last.v > r.v) ? host.last : r;
+}
+function writeRace(r) { r = { ...r, v: (race()?.v ?? 0) + 1 }; host.last = r; net.setShared("race", JSON.stringify(r)); return r; }
+
+/** How far round the race someone is: laps + share of a lap (negative while still behind the line on the grid). */
+const progress = (lap, t, half) => lap + t - (t > 0.5 && !half ? 1 : 0);
+/** Everyone in the race, as { id, name, p (progress), ft }: humans from their cars, bots from the host. */
+function racers() {
+  const out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (id === net.sessionId) { out.push({ id, name: "You", p: progress(me.lap, me.i / N, me.half), ft: me.ft, mine: true }); continue; }
+    const c = cached(id + "/car", p.car); if (c) out.push({ id, name: p.n || "Player", p: progress(c.l, c.t / N, c.hf), ft: c.ft });
+  }
+  for (const b of botList()) out.push({ id: b.i, name: b.n, p: progress(b.l, b.t / N, b.hf), ft: b.ft, bot: true });
+  return out.sort((a, b) => (a.ft && b.ft ? a.ft - b.ft : a.ft ? -1 : b.ft ? 1 : b.p - a.p));
+}
+function botList() {
+  if (isHost()) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: b.x, y: b.y, h: b.h, l: b.lap, t: Math.floor(b.f), hf: b.half ? 1 : 0, ft: b.ft, s: b.slide ? 1 : 0 }));
+  return cached("bots", S.shared.bots) || [];
+}
+
+function spawnBots(humans) {
+  const want = Math.max(0, CONFIG.seats - humans.length), keep = [...host.bots.values()].slice(0, want);
+  host.bots.clear(); keep.forEach((b) => host.bots.set(b.id, b));
+  while (host.bots.size < want) {
+    const used = new Set([...host.bots.values()].map((b) => b.name)), name = BOT_NAMES.find((n) => !used.has(n)) || "Bot";
+    const id = "b" + Math.random().toString(36).slice(2, 6);
+    host.bots.set(id, { id, name, color: COLORS[(host.bots.size + 3) % COLORS.length], skill: CONFIG.botSkill[0] + Math.random() * (CONFIG.botSkill[1] - CONFIG.botSkill[0]) });
+  }
+  let n = humans.length;
+  for (const b of host.bots.values()) { const s = gridSlot(n); Object.assign(b, { x: s.x, y: s.y, h: s.h, f: s.i, lap: 0, ft: 0, v: 0, lane: (n++ % 2 ? -1 : 1) * TR.half * 0.42, half: false, slide: false }); }
+}
+
+function hostTick(dt, now) {
+  if (!host.wasHost) { // adopt the bots exactly as state has them
+    host.wasHost = true; host.bots.clear();
+    for (const b of cached("bots", S.shared.bots) || []) host.bots.set(b.i, { id: b.i, name: b.n, color: b.c, x: b.x, y: b.y, h: b.h, f: b.t, lap: b.l, ft: b.ft, v: CONFIG.vmax * 0.7, lane: 0, skill: 0.9, half: !!b.hf });
+  }
+  let r = race();
+  const humans = livePlayers().filter((id) => !(ATTRACT && id === net.sessionId));
+  if (!r) r = writeRace({ id: 1, phase: "grid", track: 0, startAt: Date.now() + CONFIG.countdown, endsAt: 0, results: [] });
+  if (host.raceId !== r.id) { host.raceId = r.id; if (r.phase === "grid") spawnBots(humans); }
+  const t = Date.now();
+  if (r.phase === "grid" && t >= r.startAt) r = writeRace({ ...r, phase: "race" });
+  if (r.phase === "race") {
+    const all = racers(), done = all.filter((x) => x.ft);
+    const humansDone = all.filter((x) => !x.bot && (!ATTRACT || !x.mine)).every((x) => x.ft);
+    if (done.length && !r.endsAt) r = writeRace({ ...r, endsAt: t + CONFIG.afterFirst });
+    if ((done.length && humansDone && humans.length) || (r.endsAt && t > r.endsAt) || t - r.startAt > 300000 || (ATTRACT && done.length >= 3)) {
+      r = writeRace({ ...r, phase: "done", endsAt: t + CONFIG.resultsFor, results: all.map((x) => ({ id: x.id, n: x.mine ? myName : x.name, ft: x.ft || 0 })) });
+    }
+  }
+  if (r.phase === "done" && t > r.endsAt) writeRace({ id: r.id + 1, phase: "grid", track: (r.track + 1) % CONFIG.tracks.length, startAt: t + CONFIG.countdown, endsAt: 0, results: [] });
+  // Bots follow the road, slowing for corners; rubber band: faster behind the people, easier ahead.
+  const lead = Math.max(0, ...racers().filter((x) => !x.bot).map((x) => x.p));
+  for (const b of host.bots.values()) {
+    if (r.phase !== "race" || b.ft) b.v = Math.max(0, b.v - 300 * dt);
+    else {
+      let corner = CONFIG.vmax;
+      for (let k = 0; k < 22; k++) corner = Math.min(corner, TR.maxV[(Math.floor(b.f) + k) % N]);
+      const gap = progress(b.lap, b.f / N, b.half) - lead, top = corner * b.skill * (gap > 0.08 ? 0.88 : gap < -0.08 ? 1.12 : 1);
+      b.v = b.v < top ? Math.min(top, b.v + CONFIG.accel * dt) : Math.max(top, b.v - CONFIG.brake * 0.7 * dt);
+    }
+    const prev = b.f;
+    b.f = (b.f + (b.v * dt) / (TR.len / N)) % N;
+    const i = Math.floor(b.f), j = (i + 1) % N, fr = b.f - i, curve = TR.K[i];
+    b.lane += ((Math.sin(t / 1700 + b.id.charCodeAt(1)) * 0.45 - Math.sign(curve) * Math.min(0.4, Math.abs(curve))) * TR.half - b.lane) * Math.min(1, dt * 1.5);
+    b.x = TR.P[i].x + (TR.P[j].x - TR.P[i].x) * fr + TR.L[i].x * b.lane; b.y = TR.P[i].y + (TR.P[j].y - TR.P[i].y) * fr + TR.L[i].y * b.lane;
+    const slip = Math.max(-0.5, Math.min(0.5, curve * 1.6)) * (b.v / CONFIG.vmax); // nose into the corner: looks like a drift
+    b.h = Math.atan2(TR.T[i].y, TR.T[i].x) + slip; b.slide = Math.abs(slip) > 0.18;
+    if (b.f > N * 0.45 && b.f < N * 0.6) b.half = true;
+    if (b.f < prev && b.half) { b.lap++; b.half = false; if (b.lap >= CONFIG.laps && !b.ft) b.ft = Date.now() - r.startAt; }
+  }
+  if (now - host.lastBots > 100) { host.lastBots = now; net.setShared("bots", JSON.stringify(botList().map((b) => ({ ...b, x: Math.round(b.x), y: Math.round(b.y), h: +b.h.toFixed(2) })))); }
+}
+
+// ── MY CAR ──────────────────────────────────────────────────────────────────────────
+const myName = (() => { try { return localStorage.getItem("mpa-name") || ""; } catch { return ""; } })() ||
+  ["Ace", "Blaze", "Comet", "Flash", "Jet", "Spark"][Math.floor(Math.random() * 6)] + " " + (10 + Math.floor(Math.random() * 90));
+let myColor = COLORS[0]; // picked on join: the first color nobody in the room has
+const me = { x: 0, y: 0, h: 0, vx: 0, vy: 0, i: 0, lap: 0, half: false, ft: 0, drift: false, charge: 0, boost: 0, slide: false, raceId: -1,
+  started: 0, lapStart: 0, best: 0, lastSend: 0, submitted: -1 };
+const input = { left: false, right: false, gas: false, brake: false, drift: false };
+
+function resetToGrid(r) {
+  me.raceId = r.id;
+  const slot = ATTRACT ? gridSlot(CONFIG.seats) : r.phase === "grid" ? gridSlot(Math.max(0, livePlayers().indexOf(net.sessionId))) : gridSlot(0);
+  Object.assign(me, { x: slot.x, y: slot.y, h: slot.h, vx: 0, vy: 0, i: slot.i, lap: 0, half: false, ft: 0, drift: false, charge: 0, boost: 0, started: 0, best: 0 });
+  TR.skid.getContext("2d").clearRect(0, 0, TR.skid.width, TR.skid.height);
+  for (const c of cars.values()) c.fresh = true;
+  cam.snap = true;
+  $("over").hidden = true;
+}
+
+function myTick(dt, r) {
+  if (me.raceId !== r.id) resetToGrid(r);
+  const racing = r.phase === "race" && !me.ft;
+  if (racing && !me.started) { me.started = me.lapStart = Date.now(); } // lap times run on MY clock
+  if (ATTRACT) autopilot();
+  const near = nearest(me.x, me.y, me.i), off = near.d > TR.half + 4;
+  if (!racing) { const k = Math.exp(-4 * dt); me.vx *= k; me.vy *= k; me.drift = false; }
+  else {
+    const steer = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    let vf = me.vx * Math.cos(me.h) + me.vy * Math.sin(me.h);
+    me.h += steer * CONFIG.turn * dt * Math.max(-1, Math.min(1, vf / 140)) * (me.drift ? 1.3 : 1);
+    const fx = Math.cos(me.h), fy = Math.sin(me.h);
+    vf = me.vx * fx + me.vy * fy;
+    let vl = -me.vx * fy + me.vy * fx; // sideways speed: this is the slide
+    const top = CONFIG.vmax * (off ? CONFIG.offroad : 1) * (me.boost > 0 ? CONFIG.boost : 1);
+    if (input.gas) { if (vf < top) vf += CONFIG.accel * dt; } else if (input.brake) vf -= CONFIG.brake * dt; else vf -= Math.sign(vf) * Math.min(Math.abs(vf), 90 * dt);
+    if (vf > top) vf = Math.max(top, vf - 420 * dt);
+    vf = Math.max(-CONFIG.vmax * 0.35, vf);
+    const wasDrift = me.drift;
+    me.drift = input.drift && vf > 120;
+    if (me.drift && Math.abs(vl) > 40) me.charge += dt;
+    if (wasDrift && !me.drift) { if (me.charge > 0.6) { me.boost = Math.min(1.2, me.charge * 0.8); beep(660, 0.12); } me.charge = 0; }
+    vl *= Math.exp(-(me.drift ? CONFIG.driftGrip : CONFIG.grip * (off ? 0.6 : 1)) * dt);
+    me.vx = fx * vf - fy * vl; me.vy = fy * vf + fx * vl;
+    me.slide = Math.abs(vl) > 55;
+    if (off && Math.abs(vf) > 80 && Math.random() < 0.5) puff(me.x, me.y, "#b39a6b");
+  }
+  me.boost = Math.max(0, me.boost - dt);
+  me.x += me.vx * dt; me.y += me.vy * dt;
+  // bump out of other cars
+  for (const c of cars.values()) {
+    const dx = me.x - c.x, dy = me.y - c.y, d = Math.hypot(dx, dy);
+    if (d < 22 && d > 0.01) { me.x += (dx / d) * (22 - d); me.y += (dy / d) * (22 - d); me.vx *= 0.96; me.vy *= 0.96; }
+  }
+  // the tire wall: never further than `runoff` from the road
+  const n2 = nearest(me.x, me.y, near.i), p = TR.P[n2.i], lim = TR.half + CONFIG.runoff;
+  if (n2.d > lim) {
+    const nx = (me.x - p.x) / n2.d, ny = (me.y - p.y) / n2.d, out = me.vx * nx + me.vy * ny;
+    me.x = p.x + nx * lim; me.y = p.y + ny * lim;
+    if (out > 0) { me.vx -= nx * out * 1.5; me.vy -= ny * out * 1.5; if (out > 120) { shake = 6; beep(90, 0.15); } }
+  }
+  const prev = me.i; me.i = n2.i;
+  if (racing) {
+    if (me.i > N * 0.45 && me.i < N * 0.6) me.half = true;
+    if (prev > N * 0.9 && me.i < N * 0.1 && me.half) {
+      me.half = false; me.lap++;
+      const lapMs = Date.now() - me.lapStart; me.lapStart = Date.now();
+      if (!me.best || lapMs < me.best) me.best = lapMs;
+      if (me.lap >= CONFIG.laps) { me.ft = Date.now() - me.started; beep(880, 0.3); } else beep(520, 0.12);
+    }
+    if (prev < N * 0.1 && me.i > N * 0.9) me.half = false; // backwards over the line
+  }
+  const now = performance.now();
+  if (now - me.lastSend > 66) { me.lastSend = now; net.me.set("car", JSON.stringify({ x: Math.round(me.x), y: Math.round(me.y), h: +me.h.toFixed(2), l: me.lap, t: me.i, hf: me.half ? 1 : 0, ft: me.ft, s: me.slide ? 1 : 0 })); }
+}
+
+/** ?attract: your car drives itself along the road, at about the bots' pace. */
+function autopilot() {
+  const ahead = TR.P[(me.i + 14) % N], want = Math.atan2(ahead.y - me.y, ahead.x - me.x);
+  const diff = Math.atan2(Math.sin(want - me.h), Math.cos(want - me.h)), v = Math.hypot(me.vx, me.vy);
+  input.left = diff < -0.06; input.right = diff > 0.06;
+  input.gas = v < TR.maxV[(me.i + 10) % N] * 0.95; input.brake = false; input.drift = Math.abs(diff) > 0.35 && v > 200;
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const cv = document.getElementById("game"), ctx = cv.getContext("2d");
+let SW = 0, SH = 0, DPR = 1, shake = 0;
+function fit() { DPR = Math.min(2, devicePixelRatio || 1); SW = innerWidth; SH = innerHeight; cv.width = SW * DPR; cv.height = SH * DPR; }
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+const cam = { x: 0, y: 0, snap: true };
+const cars = new Map(); // id -> { x, y, h, color, name, slide, wheels } everyone but me, eased toward their last state
+const parts = [];
+function puff(x, y, color) { if (parts.length < 260) parts.push({ x: x + (Math.random() - 0.5) * 8, y: y + (Math.random() - 0.5) * 8, r: 4 + Math.random() * 4, life: 0.7, color }); }
+
+/** Everyone else's cars, eased toward where they last said they were. */
+function updateCars(dt) {
+  const seen = new Set();
+  const place = (id, x, y, h, color, name, slide) => {
+    let c = cars.get(id);
+    if (!c) { c = { fresh: true }; cars.set(id, c); }
+    if (c.fresh) Object.assign(c, { x, y, h, fresh: false, wheels: null });
+    const k = 1 - Math.pow(0.0005, dt);
+    c.x += (x - c.x) * k; c.y += (y - c.y) * k; c.h += Math.atan2(Math.sin(h - c.h), Math.cos(h - c.h)) * k;
+    Object.assign(c, { color, name, slide }); seen.add(id);
+  };
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (id === net.sessionId) continue;
+    const c = cached(id + "/car", p.car); if (c) place(id, c.x, c.y, c.h, p.c || "#ccc", p.n || "Player", !!c.s);
+  }
+  for (const b of botList()) place(b.i, b.x, b.y, b.h, b.c, b.n, !!b.s);
+  for (const id of cars.keys()) if (!seen.has(id)) cars.delete(id);
+}
+
+/** Two dark lines from the rear wheels while a car slides. */
+function skid(c, sliding) {
+  const bx = Math.cos(c.h), by = Math.sin(c.h), rear = [[-8, -6], [-8, 6]].map(([a, s]) => ({ x: c.x + bx * a - by * s, y: c.y + by * a + bx * s }));
+  if (sliding && c.wheels) {
+    const g = TR.skid.getContext("2d"); g.strokeStyle = "#1b1b1f55"; g.lineWidth = 3; g.lineCap = "round"; g.beginPath();
+    for (let w = 0; w < 2; w++) { g.moveTo(c.wheels[w].x - TR.ox, c.wheels[w].y - TR.oy); g.lineTo(rear[w].x - TR.ox, rear[w].y - TR.oy); }
+    g.stroke();
+    if (Math.random() < 0.35) puff(rear[0].x, rear[0].y, "#d8d8d8");
+  }
+  c.wheels = sliding ? rear : null;
+}
+
+function drawCar(x, y, h, color, glow) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(h);
+  ctx.fillStyle = "#0004"; rr(-11, -5, 26, 14, 4); ctx.fill();                       // shadow
+  ctx.fillStyle = "#1b1b1f"; for (const [a, s] of [[-8, -8.5], [8, -8.5], [-8, 4.5], [8, 4.5]]) ctx.fillRect(a - 4, s, 8, 4); // wheels
+  ctx.fillStyle = color; rr(-13, -7, 26, 14, 4); ctx.fill(); ctx.strokeStyle = "#0006"; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.fillStyle = "#1d2b3add"; rr(1, -5, 6, 10, 2); ctx.fill();                      // windshield
+  ctx.fillStyle = "#ffffff59"; ctx.fillRect(-10, -1.5, 10, 3);                        // roof stripe
+  ctx.fillStyle = "#fff6b0"; ctx.fillRect(11, -5.5, 2, 3); ctx.fillRect(11, 2.5, 2, 3); // headlights
+  if (glow) { ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(-15, 0, 4 + Math.random() * 3, 0, Math.PI * 2); ctx.fill(); } // boost flame / drift sparks
+  ctx.restore();
+}
+function rr(x, y, w, h, r) { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h); }
+
+function draw(dt, r) {
+  const z = Math.min(SW, SH) / (ATTRACT ? 400 : 480);
+  const tx = me.x + me.vx * 0.35, ty = me.y + me.vy * 0.35; // look ahead the way you're going
+  if (cam.snap) { cam.x = tx; cam.y = ty; cam.snap = false; } else { cam.x += (tx - cam.x) * Math.min(1, dt * 4); cam.y += (ty - cam.y) * Math.min(1, dt * 4); }
+  shake = Math.max(0, shake - dt * 30);
+  ctx.setTransform(DPR * z, 0, 0, DPR * z, DPR * (SW / 2 - cam.x * z + (Math.random() - 0.5) * shake), DPR * (SH / 2 - cam.y * z + (Math.random() - 0.5) * shake));
+  mowedStripes(ctx, cam.x - SW / z / 2 - 60, cam.y - SH / z / 2 - 60, SW / z + 120, SH / z + 120); // the grass beyond the track picture
+  ctx.drawImage(TR.canvas, TR.ox, TR.oy);
+  for (const c of cars.values()) skid(c, c.slide);
+  skid(me, me.slide || me.drift);
+  ctx.drawImage(TR.skid, TR.ox, TR.oy);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i]; p.life -= dt; if (p.life <= 0) { parts.splice(i, 1); continue; }
+    ctx.globalAlpha = p.life * 0.7; ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (1.6 - p.life), 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  for (const c of cars.values()) drawCar(c.x, c.y, c.h, c.color, null);
+  drawCar(me.x, me.y, me.h, myColor, me.boost > 0 ? "#ff9b3d" : me.drift && me.charge > 0.6 ? "#7ad7ff" : null);
+  if (!ATTRACT) {
+    ctx.font = "700 11px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.lineWidth = 3; ctx.strokeStyle = "#000a"; ctx.fillStyle = "#fff";
+    for (const c of cars.values()) { ctx.strokeText(c.name, c.x, c.y - 18); ctx.fillText(c.name, c.x, c.y - 18); }
+  }
+  drawMap();
+}
+
+const map = document.getElementById("map"), mctx = map.getContext("2d");
+function drawMap() {
+  if (ATTRACT) { map.style.display = "none"; return; }
+  const W = 120 * Math.min(2, DPR), H = 90 * Math.min(2, DPR);
+  if (map.width !== W) { map.width = W; map.height = H; }
+  const xs = TR.P.map((p) => p.x), ys = TR.P.map((p) => p.y), x0 = Math.min(...xs), y0 = Math.min(...ys);
+  const k = Math.min((W - 16) / (Math.max(...xs) - x0), (H - 16) / (Math.max(...ys) - y0)), X = (x) => 8 + (x - x0) * k, Y = (y) => 8 + (y - y0) * k;
+  mctx.clearRect(0, 0, W, H); mctx.strokeStyle = "#ffffffaa"; mctx.lineWidth = 3; mctx.lineJoin = "round"; mctx.beginPath();
+  TR.P.forEach((p, i) => (i ? mctx.lineTo(X(p.x), Y(p.y)) : mctx.moveTo(X(p.x), Y(p.y)))); mctx.closePath(); mctx.stroke();
+  for (const c of cars.values()) { mctx.fillStyle = c.color; mctx.beginPath(); mctx.arc(X(c.x), Y(c.y), 3, 0, Math.PI * 2); mctx.fill(); }
+  mctx.fillStyle = myColor; mctx.strokeStyle = "#fff"; mctx.lineWidth = 2; mctx.beginPath(); mctx.arc(X(me.x), Y(me.y), 4.5, 0, Math.PI * 2); mctx.fill(); mctx.stroke();
+}
+
+// Sound: an engine hum that follows your speed, and beeps. Starts on the first key or tap.
+let audio = null, engine = null;
+function unlockAudio() {
+  if (audio || ATTRACT) return;
+  try {
+    audio = new AudioContext();
+    const o = audio.createOscillator(), f = audio.createBiquadFilter(), g = audio.createGain();
+    o.type = "sawtooth"; f.type = "lowpass"; f.frequency.value = 600; g.gain.value = 0.025;
+    o.connect(f).connect(g).connect(audio.destination); o.start(); engine = o;
+  } catch { audio = null; }
+}
+function beep(freq, dur) {
+  if (!audio) return;
+  const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime;
+  o.type = "square"; o.frequency.value = freq; g.gain.setValueAtTime(0.06, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(audio.destination); o.start(t); o.stop(t + dur);
+}
+
+// ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const ord = (n) => n + (n % 10 === 1 && n % 100 !== 11 ? "st" : n % 10 === 2 && n % 100 !== 12 ? "nd" : n % 10 === 3 && n % 100 !== 13 ? "rd" : "th");
+const fmt = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}.${String(Math.floor(ms % 1000)).padStart(3, "0")}`;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+let player = null, boardFor = -1, netDown = false, lastCount = "", firstSeen = 0;
+function hud(r) {
+  const t = Date.now();
+  const count = r.phase === "grid" && r.startAt - t < 3000 ? String(Math.max(1, Math.ceil((r.startAt - t) / 1000))) : r.phase === "race" && t - r.startAt < 900 ? "GO!" : "";
+  if (count !== lastCount) { lastCount = count; if (count) beep(count === "GO!" ? 880 : 440, 0.2); }
+  $("count").textContent = ATTRACT ? "" : count;
+  if (ATTRACT) { for (const id of ["pos", "lap", "net", "msg", "hint"]) $(id).textContent = ""; return; }
+  const order = racers(), at = order.findIndex((x) => x.mine) + 1;
+  $("pos").innerHTML = at ? `${ord(at)} <small>/ ${order.length}</small>` : "";
+  const lapNow = me.started && !me.ft ? ` · ${fmt(t - me.lapStart)}` : "";
+  $("lap").textContent = me.ft ? `Finished · ${fmt(me.ft)}` : `Lap ${Math.min(CONFIG.laps, me.lap + 1)}/${CONFIG.laps}${lapNow}${me.best ? ` · best ${fmt(me.best)}` : ""}`;
+  $("msg").textContent = r.phase === "grid" ? TR.def.name : me.ft && r.phase === "race" ? "Waiting for the others…" : "";
+  if (!firstSeen) firstSeen = t;
+  $("hint").style.opacity = t - firstSeen < 9000 ? 1 : 0;
+  $("hint").textContent = touchUI ? "It drives itself: steer with ◀ ▶, hold DRIFT in corners for a boost" : "Arrows or WASD to drive · hold Shift or Space to drift, let go for a boost";
+  const n = livePlayers().length;
+  $("net").textContent = netDown ? "Reconnecting…" : net.offline ? "Offline: racing bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the race" : ""}`;
+  $("over").hidden = r.phase !== "done";
+  if (r.phase === "done") {
+    $("results").innerHTML = r.results.map((x) => `<li class="${x.id === net.sessionId ? "me" : ""}">${esc(x.n)}<span>${x.ft ? fmt(x.ft) : "DNF"}</span></li>`).join("");
+    $("next").textContent = `Next race in ${Math.max(0, Math.ceil((r.endsAt - t) / 1000))}s · ${CONFIG.tracks[(r.track + 1) % CONFIG.tracks.length].name}`;
+    if (boardFor !== r.id) { boardFor = r.id; showBoard(); }
+  }
+}
+function showBoard() {
+  const list = $("board");
+  $("boardTitle").textContent = `Best laps on ${TR.def.name}`;
+  if (!player) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  const board = player.leaderboard(`${CONFIG.board}-${TR.def.key}`);
+  const submit = me.best && me.submitted !== me.raceId ? board.submit(Math.max(0, 600000 - me.best)).catch(() => null) : Promise.resolve();
+  me.submitted = me.raceId;
+  submit.then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(600000 - e.score)}</span></li>`).join("") : "<li>No laps yet. Set the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches && !ATTRACT;
+$("padL").hidden = $("padR").hidden = !touchUI;
+document.body.classList.toggle("touch", touchUI);
+const KEYS = { ArrowLeft: "left", a: "left", ArrowRight: "right", d: "right", ArrowUp: "gas", w: "gas", ArrowDown: "brake", s: "brake", Shift: "drift", " ": "drift" };
+addEventListener("keydown", (e) => { unlockAudio(); const k = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key]; if (k) { e.preventDefault(); input[k] = true; } });
+addEventListener("keyup", (e) => { const k = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key]; if (k) input[k] = false; });
+for (const b of document.querySelectorAll(".pad button")) {
+  const k = b.dataset.k, on = (v) => { input[k] = v; b.classList.toggle("on", v); };
+  b.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); b.setPointerCapture(e.pointerId); on(true); });
+  for (const ev of ["pointerup", "pointercancel"]) b.addEventListener(ev, () => on(false));
+}
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); });
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  if (touchUI) input.gas = !input.brake; // touch drives on its own
+  useTrack(race()?.track ?? 0);
+  if (isHost()) hostTick(dt, now); else host.wasHost = false;
+  const r = race();
+  if (r) {
+    useTrack(r.track);
+    updateCars(dt);
+    myTick(dt, r);
+    draw(dt, r);
+    if (engine) engine.frequency.value = 50 + Math.hypot(me.vx, me.vy) * 0.45;
+    if (now - lastHud > 100) { lastHud = now; hud(r); }
+  }
+  requestAnimationFrame(frame);
+}
+
+/** If someone with a lower id has my color (the room can look empty at the moment I join), take a free one. */
+function fixColor() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
+  if (!others.some(([id, p]) => p.c === myColor && id < net.sessionId)) return;
+  const taken = new Set(others.map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || myColor;
+  net.me.set("c", myColor);
+}
+
+(async function start() {
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.onDisconnect(() => { netDown = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { netDown = false; });
+  if (!net.offline && typeof MP !== "undefined") player = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl });
+  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

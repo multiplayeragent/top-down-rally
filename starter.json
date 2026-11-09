@@ -1,0 +1,21 @@
+{
+  "name": "Top-Down Rally",
+  "genre": "racing",
+  "dim": "2D",
+  "mode": "Versus",
+  "players": "2–6",
+  "hook": "Tiny cars and tight corners.",
+  "how": "Race tiny cars around a top-down track. Grass slows you down. Hold drift through a corner and let go for a boost. Three laps, then on to the next track.",
+  "controls": "Arrow keys or WASD, Shift or Space to drift, or on-screen buttons",
+  "uses": [
+    ["Leaderboard", "The fastest laps on each track."],
+    ["Host-run rounds", "Races start, finish and move to the next track together for everyone."],
+    ["Bots", "Rubber-banded bots fill the grid until enough people join."],
+    ["Live sync", "Every car moves for everyone at once."]
+  ],
+  "ideas": [
+    "Add oil slicks that spin cars",
+    "Set the track on a kitchen table",
+    "Add a lap timer with a ghost of your best lap"
+  ]
+}
