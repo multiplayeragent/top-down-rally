@@ -22,7 +22,7 @@
   .touch #hint { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 205px); }
   #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0006; }
   #over[hidden], .pad[hidden] { display: none; }
-  .card { width: min(380px, 90vw); max-height: 80vh; overflow: auto; padding: 20px; border-radius: 16px; background: #1f2a1c; border: 1px solid #ffffff2a; }
+  .card { box-sizing: border-box; width: min(422px, calc(100vw - 32px)); max-height: 80vh; overflow: auto; padding: 20px; border-radius: 16px; background: #1f2a1c; border: 1px solid #ffffff2a; }
   .card h2 { margin: 0 0 8px; font-size: 22px; }
   .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffd23f; }
   .card ol { margin: 0; padding-left: 24px; font-size: 14px; }
@@ -280,8 +280,9 @@ function writeRace(r) { r = { ...r, v: (race()?.v ?? 0) + 1 }; host.last = r; ne
 const progress = (lap, t, half) => lap + t - (t > 0.5 && !half ? 1 : 0);
 /** Everyone in the race, as { id, name, p (progress), ft }: humans from their cars, bots from the host. */
 function racers() {
-  const out = [];
+  const out = [], live = new Set(livePlayers());
   for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (id !== net.sessionId && !live.has(id)) continue; // a closed tab stays in state ~30s: not a racer
     if (id === net.sessionId) { out.push({ id, name: "You", p: progress(me.lap, me.i / N, me.half), ft: me.ft, mine: true }); continue; }
     const c = cached(id + "/car", p.car); if (c) out.push({ id, name: p.n || "Player", p: progress(c.l, c.t / N, c.hf), ft: c.ft });
   }
@@ -298,8 +299,9 @@ function spawnBots(humans) {
   host.bots.clear(); keep.forEach((b) => host.bots.set(b.id, b));
   while (host.bots.size < want) {
     const used = new Set([...host.bots.values()].map((b) => b.name)), name = BOT_NAMES.find((n) => !used.has(n)) || "Bot";
-    const id = "b" + Math.random().toString(36).slice(2, 6);
-    host.bots.set(id, { id, name, color: COLORS[(host.bots.size + 3) % COLORS.length], skill: CONFIG.botSkill[0] + Math.random() * (CONFIG.botSkill[1] - CONFIG.botSkill[0]) });
+    const id = "b" + Math.random().toString(36).slice(2, 6), pref = COLORS[(host.bots.size + 3) % COLORS.length];
+    const colorsUsed = new Set([myColor, ...Object.values(S.entities.players || {}).map((p) => p.c), ...[...host.bots.values()].map((b) => b.color)]); // never a color someone has
+    host.bots.set(id, { id, name, color: colorsUsed.has(pref) ? COLORS.find((c) => !colorsUsed.has(c)) || pref : pref, skill: CONFIG.botSkill[0] + Math.random() * (CONFIG.botSkill[1] - CONFIG.botSkill[0]) });
   }
   let n = humans.length;
   for (const b of host.bots.values()) { const s = gridSlot(n); Object.assign(b, { x: s.x, y: s.y, h: s.h, f: s.i, lap: 0, ft: 0, v: 0, lane: (n++ % 2 ? -1 : 1) * TR.half * 0.42, half: false, slide: false }); }
@@ -451,8 +453,9 @@ function updateCars(dt) {
     c.x += (x - c.x) * k; c.y += (y - c.y) * k; c.h += Math.atan2(Math.sin(h - c.h), Math.cos(h - c.h)) * k;
     Object.assign(c, { color, name, slide }); seen.add(id);
   };
+  const live = new Set(livePlayers());
   for (const [id, p] of Object.entries(S.entities.players || {})) {
-    if (id === net.sessionId) continue;
+    if (id === net.sessionId || !live.has(id)) continue; // only live players: a closed tab's car would sit there frozen
     const c = cached(id + "/car", p.car); if (c) place(id, c.x, c.y, c.h, p.c || "#ccc", p.n || "Player", !!c.s);
   }
   for (const b of botList()) place(b.i, b.x, b.y, b.h, b.c, b.n, !!b.s);
@@ -599,7 +602,7 @@ document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: fal
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
 let last = performance.now(), lastHb = 0, lastHud = 0;
 function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // never negative: the first frame can be stamped before `last`
   if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
   if (touchUI) input.gas = !input.brake; // touch drives on its own
   useTrack(race()?.track ?? 0);
@@ -616,11 +619,11 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-/** If someone with a lower id has my color (the room can look empty at the moment I join), take a free one. */
+/** If someone with a lower id (or a bot) has my color (the room can look empty at the moment I join), take a free one. */
 function fixColor() {
-  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
-  if (!others.some(([id, p]) => p.c === myColor && id < net.sessionId)) return;
-  const taken = new Set(others.map(([, p]) => p.c));
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId), botColors = botList().map((b) => b.c);
+  if (!others.some(([id, p]) => p.c === myColor && id < net.sessionId) && !botColors.includes(myColor)) return;
+  const taken = new Set([...others.map(([, p]) => p.c), ...botColors]);
   myColor = COLORS.find((c) => !taken.has(c)) || myColor;
   net.me.set("c", myColor);
 }
@@ -631,7 +634,7 @@ function fixColor() {
   net.onDisconnect(() => { netDown = true; $("net").textContent = "Reconnecting…"; });
   net.onReconnect(() => { netDown = false; });
   if (!net.offline && typeof MP !== "undefined") player = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl });
-  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...(parse(S.shared.bots, []) || []).map((b) => b.c)]);
   myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
   net.me.set({ n: myName, c: myColor, hb: Date.now() });
   requestAnimationFrame(frame);
