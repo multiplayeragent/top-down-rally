@@ -77,6 +77,7 @@
  *     then resets to its grid box. Someone who joins mid-race starts from the line.
  *   - No intents are needed: laps and finish times are each driver's own facts.
  *   - Bots are rubber-banded: they speed up when they're behind the people and ease off ahead.
+ *     They drift-boost out of long corners like a player, and move over to pass other cars.
  *   - ?attract plays offline with bots only (the preview video is recorded from it).
  *   - Leaderboard "best-lap-<track>": each player's fastest lap on that track (stored as
  *     600000 - ms, so higher is better), shown on the results card.
@@ -96,6 +97,7 @@ const CONFIG = {
   runoff: 110,         // px of grass beside the road before the tire wall
   countdown: 4000,     // ms on the grid before GO
   afterFirst: 20000,   // ms the race stays open after the first finisher
+  afterHumans: 8000,   // once every player has finished, ms the bots still get to finish
   resultsFor: 9000,    // ms the results show before the next race
   botSkill: [0.86, 0.95], // bots drive at this share of their best pace
   board: "best-lap",   // leaderboard name prefix; each track gets its own board
@@ -292,7 +294,7 @@ function racers() {
   return out.sort((a, b) => (a.ft && b.ft ? a.ft - b.ft : a.ft ? -1 : b.ft ? 1 : b.p - a.p));
 }
 function botList() {
-  if (isHost()) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: b.x, y: b.y, h: b.h, l: b.lap, t: Math.floor(b.f), hf: b.half ? 1 : 0, ft: b.ft, s: b.slide ? 1 : 0 }));
+  if (isHost()) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: b.x, y: b.y, h: b.h, l: b.lap, t: Math.floor(b.f), hf: b.half ? 1 : 0, ft: b.ft, s: b.slide ? 1 : 0, g: b.boost > 0 ? 1 : b.charge > 0.6 ? 2 : 0 }));
   return cached("bots", S.shared.bots) || [];
 }
 
@@ -306,50 +308,75 @@ function spawnBots(humans) {
     host.bots.set(id, { id, name, color: colorsUsed.has(pref) ? COLORS.find((c) => !colorsUsed.has(c)) || pref : pref, skill: CONFIG.botSkill[0] + Math.random() * (CONFIG.botSkill[1] - CONFIG.botSkill[0]) });
   }
   let n = humans.length;
-  for (const b of host.bots.values()) { const s = gridSlot(n); Object.assign(b, { x: s.x, y: s.y, h: s.h, f: s.i, lap: 0, ft: 0, v: 0, lane: (n++ % 2 ? -1 : 1) * TR.half * 0.42, half: false, slide: false }); }
+  for (const b of host.bots.values()) { const s = gridSlot(n); Object.assign(b, { x: s.x, y: s.y, h: s.h, f: s.i, lap: 0, ft: 0, v: 0, lane: (n++ % 2 ? -1 : 1) * TR.half * 0.42, half: false, slide: false, charge: 0, boost: 0 }); }
 }
 
 function hostTick(dt, now) {
   if (!host.wasHost) { // adopt the bots exactly as state has them
     host.wasHost = true; host.bots.clear();
-    for (const b of cached("bots", S.shared.bots) || []) host.bots.set(b.i, { id: b.i, name: b.n, color: b.c, x: b.x, y: b.y, h: b.h, f: b.t, lap: b.l, ft: b.ft, v: CONFIG.vmax * 0.7, lane: 0, skill: 0.9, half: !!b.hf });
+    for (const b of cached("bots", S.shared.bots) || []) host.bots.set(b.i, { id: b.i, name: b.n, color: b.c, x: b.x, y: b.y, h: b.h, f: b.t, lap: b.l, ft: b.ft, v: CONFIG.vmax * 0.7, lane: 0, skill: 0.9, half: !!b.hf, charge: 0, boost: 0 });
   }
   let r = race();
   const humans = livePlayers().filter((id) => !(ATTRACT && id === net.sessionId));
   if (!r) r = writeRace({ id: 1, phase: "grid", track: 0, startAt: Date.now() + CONFIG.countdown, endsAt: 0, results: [] });
   if (host.raceId !== r.id) { host.raceId = r.id; if (r.phase === "grid") spawnBots(humans); }
+  else if (r.phase === "grid" && host.bots.size !== Math.max(0, CONFIG.seats - humans.length)) spawnBots(humans); // someone joined or left before GO: bots make room
   const t = Date.now();
   if (r.phase === "grid" && t >= r.startAt) r = writeRace({ ...r, phase: "race" });
   if (r.phase === "race") {
     const all = racers(), done = all.filter((x) => x.ft);
     const humansDone = all.filter((x) => !x.bot && (!ATTRACT || !x.mine)).every((x) => x.ft);
     if (done.length && !r.endsAt) r = writeRace({ ...r, endsAt: t + CONFIG.afterFirst });
-    if ((done.length && humansDone && humans.length) || (r.endsAt && t > r.endsAt) || t - r.startAt > 300000 || (ATTRACT && done.length >= 3)) {
+    if (done.length && humansDone && humans.length && r.endsAt > t + CONFIG.afterHumans) r = writeRace({ ...r, endsAt: t + CONFIG.afterHumans });
+    if (all.every((x) => x.ft) || (r.endsAt && t > r.endsAt) || t - r.startAt > 300000 || (ATTRACT && done.length >= 3)) {
       r = writeRace({ ...r, phase: "done", endsAt: t + CONFIG.resultsFor, results: all.map((x) => ({ id: x.id, n: x.mine ? myName : x.name, ft: x.ft || 0 })) });
     }
   }
   if (r.phase === "done" && t > r.endsAt) writeRace({ id: r.id + 1, phase: "grid", track: (r.track + 1) % CONFIG.tracks.length, startAt: t + CONFIG.countdown, endsAt: 0, results: [] });
-  // Bots follow the road, slowing for corners; rubber band: faster behind the people, easier ahead.
+  // Bots follow the road, slowing for corners; rubber band: faster behind the people (the further behind, the faster), easier ahead.
   const lead = Math.max(0, ...racers().filter((x) => !x.bot).map((x) => x.p));
   for (const b of host.bots.values()) {
     if (r.phase !== "race" || b.ft) b.v = Math.max(0, b.v - 300 * dt);
     else {
       let corner = CONFIG.vmax;
       for (let k = 0; k < 22; k++) corner = Math.min(corner, TR.maxV[(Math.floor(b.f) + k) % N]);
-      const gap = progress(b.lap, b.f / N, b.half) - lead, top = corner * b.skill * (gap > 0.08 ? 0.88 : gap < -0.08 ? 1.12 : 1);
+      const gap = progress(b.lap, b.f / N, b.half) - lead, top = corner * b.skill * (gap > 0.08 ? 0.88 : gap < -0.04 ? 1.12 + Math.min(0.2, -gap) : 1) * (b.boost > 0 ? CONFIG.boost : 1) * (b.blocked || 1);
       b.v = b.v < top ? Math.min(top, b.v + CONFIG.accel * dt) : Math.max(top, b.v - CONFIG.brake * 0.7 * dt);
     }
     const prev = b.f;
     b.f = (b.f + (b.v * dt) / (TR.len / N)) % N;
     const i = Math.floor(b.f), j = (i + 1) % N, fr = b.f - i, curve = TR.K[i];
-    b.lane += ((Math.sin(t / 1700 + b.id.charCodeAt(1)) * 0.45 - Math.sign(curve) * Math.min(0.4, Math.abs(curve))) * TR.half - b.lane) * Math.min(1, dt * 1.5);
+    if (r.phase !== "grid") b.lane += ((Math.sin(t / 1700 + b.id.charCodeAt(1)) * 0.45 - Math.sign(curve) * Math.min(0.4, Math.abs(curve))) * TR.half - b.lane) * Math.min(1, dt * 1.5); // (on the grid it stays in its box)
     b.x = TR.P[i].x + (TR.P[j].x - TR.P[i].x) * fr + TR.L[i].x * b.lane; b.y = TR.P[i].y + (TR.P[j].y - TR.P[i].y) * fr + TR.L[i].y * b.lane;
     const slip = Math.max(-0.5, Math.min(0.5, curve * 1.6)) * (b.v / CONFIG.vmax); // nose into the corner: looks like a drift
     b.h = Math.atan2(TR.T[i].y, TR.T[i].x) + slip; b.slide = Math.abs(slip) > 0.18;
+    // drift boost, like a player's: a long slide through a corner, then a boost out of it
+    b.boost = Math.max(0, (b.boost || 0) - dt);
+    if (b.slide && r.phase === "race") b.charge = (b.charge || 0) + dt;
+    else { if (b.charge > 0.6) b.boost = Math.min(1.2, b.charge * 0.8); b.charge = 0; }
     if (b.f > N * 0.45 && b.f < N * 0.6) b.half = true;
     if (b.f < prev && b.half) { b.lap++; b.half = false; if (b.lap >= CONFIG.laps && !b.ft) b.ft = Date.now() - r.startAt; }
   }
+  if (r.phase === "race") botTraffic();
   if (now - host.lastBots > 100) { host.lastBots = now; net.setShared("bots", JSON.stringify(botList().map((b) => ({ ...b, x: Math.round(b.x), y: Math.round(b.y), h: +b.h.toFixed(2) })))); }
+}
+
+/** Bots don't drive through cars: they move over to pass, and wait behind one they can't get round. */
+function botTraffic() {
+  const bots = [...host.bots.values()], others = [...bots, me, ...[...cars.entries()].filter(([id]) => !host.bots.has(id)).map(([, c]) => c)];
+  for (const b of bots) {
+    b.blocked = 1;
+    if (b.ft) continue;
+    const i = Math.floor(b.f), T = TR.T[i], L = TR.L[i];
+    for (const o of others) {
+      if (o === b) continue;
+      const dx = o.x - b.x, dy = o.y - b.y, along = dx * T.x + dy * T.y, side = dx * L.x + dy * L.y;
+      if (along < -20 || along > 46 || Math.abs(side) > 22) continue; // not in my way
+      b.lane -= (side >= 0 ? 1 : -1) * (22 - Math.abs(side)) * 0.15; // move over
+      if (along > 0 && Math.abs(side) < 16) b.blocked = Math.min(b.blocked, 0.8); // right behind it: ease off
+    }
+    b.lane = Math.max(-TR.half * 0.8, Math.min(TR.half * 0.8, b.lane));
+  }
 }
 
 // ── MY CAR ──────────────────────────────────────────────────────────────────────────
@@ -423,7 +450,7 @@ function myTick(dt, r) {
     if (prev < N * 0.1 && me.i > N * 0.9) me.half = false; // backwards over the line
   }
   const now = performance.now();
-  if (now - me.lastSend > 66) { me.lastSend = now; net.me.set("car", JSON.stringify({ x: Math.round(me.x), y: Math.round(me.y), h: +me.h.toFixed(2), l: me.lap, t: me.i, hf: me.half ? 1 : 0, ft: me.ft, s: me.slide ? 1 : 0 })); }
+  if (now - me.lastSend > 66) { me.lastSend = now; net.me.set("car", JSON.stringify({ x: Math.round(me.x), y: Math.round(me.y), h: +me.h.toFixed(2), l: me.lap, t: me.i, hf: me.half ? 1 : 0, ft: me.ft, s: me.slide ? 1 : 0, g: me.boost > 0 ? 1 : me.drift && me.charge > 0.6 ? 2 : 0 })); }
 }
 
 /** ?attract: your car drives itself along the road, at about the bots' pace. */
@@ -447,20 +474,20 @@ function puff(x, y, color) { if (parts.length < 260) parts.push({ x: x + (Math.r
 /** Everyone else's cars, eased toward where they last said they were. */
 function updateCars(dt) {
   const seen = new Set();
-  const place = (id, x, y, h, color, name, slide) => {
+  const place = (id, x, y, h, color, name, slide, glow) => {
     let c = cars.get(id);
     if (!c) { c = { fresh: true }; cars.set(id, c); }
     if (c.fresh) Object.assign(c, { x, y, h, fresh: false, wheels: null });
     const k = 1 - Math.pow(0.0005, dt);
     c.x += (x - c.x) * k; c.y += (y - c.y) * k; c.h += Math.atan2(Math.sin(h - c.h), Math.cos(h - c.h)) * k;
-    Object.assign(c, { color, name, slide }); seen.add(id);
+    Object.assign(c, { color, name, slide, glow }); seen.add(id);
   };
   const live = new Set(livePlayers());
   for (const [id, p] of Object.entries(S.entities.players || {})) {
     if (id === net.sessionId || !live.has(id)) continue; // only live players: a closed tab's car would sit there frozen
-    const c = cached(id + "/car", p.car); if (c) place(id, c.x, c.y, c.h, p.c || "#ccc", p.n || "Player", !!c.s);
+    const c = cached(id + "/car", p.car); if (c) place(id, c.x, c.y, c.h, p.c || "#ccc", p.n || "Player", !!c.s, c.g);
   }
-  for (const b of botList()) place(b.i, b.x, b.y, b.h, b.c, b.n, !!b.s);
+  for (const b of botList()) place(b.i, b.x, b.y, b.h, b.c, b.n, !!b.s, b.g);
   for (const id of cars.keys()) if (!seen.has(id)) cars.delete(id);
 }
 
@@ -476,6 +503,7 @@ function skid(c, sliding) {
   c.wheels = sliding ? rear : null;
 }
 
+const GLOW = [null, "#ff9b3d", "#7ad7ff"]; // 1 = boost flame, 2 = drift charged (sparks)
 function drawCar(x, y, h, color, glow) {
   ctx.save(); ctx.translate(x, y); ctx.rotate(h);
   ctx.fillStyle = "#0004"; rr(-11, -5, 26, 14, 4); ctx.fill();                       // shadow
@@ -505,8 +533,8 @@ function draw(dt, r) {
     ctx.globalAlpha = p.life * 0.7; ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (1.6 - p.life), 0, Math.PI * 2); ctx.fill();
   }
   ctx.globalAlpha = 1;
-  for (const c of cars.values()) drawCar(c.x, c.y, c.h, c.color, null);
-  drawCar(me.x, me.y, me.h, myColor, me.boost > 0 ? "#ff9b3d" : me.drift && me.charge > 0.6 ? "#7ad7ff" : null);
+  for (const c of cars.values()) drawCar(c.x, c.y, c.h, c.color, GLOW[c.glow]);
+  drawCar(me.x, me.y, me.h, myColor, me.boost > 0 ? GLOW[1] : me.drift && me.charge > 0.6 ? GLOW[2] : null);
   if (!ATTRACT) {
     ctx.font = "700 11px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.lineWidth = 3; ctx.strokeStyle = "#000a"; ctx.fillStyle = "#fff";
     for (const c of cars.values()) { ctx.strokeText(c.name, c.x, c.y - 18); ctx.fillText(c.name, c.x, c.y - 18); }
@@ -593,6 +621,7 @@ document.body.classList.toggle("touch", touchUI);
 const KEYS = { ArrowLeft: "left", a: "left", ArrowRight: "right", d: "right", ArrowUp: "gas", w: "gas", ArrowDown: "brake", s: "brake", Shift: "drift", " ": "drift" };
 addEventListener("keydown", (e) => { unlockAudio(); const k = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key]; if (k) { e.preventDefault(); input[k] = true; } });
 addEventListener("keyup", (e) => { const k = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key]; if (k) input[k] = false; });
+addEventListener("blur", () => { for (const k in input) input[k] = false; }); // keys let go when the tab loses focus
 for (const b of document.querySelectorAll(".pad button")) {
   const k = b.dataset.k, on = (v) => { input[k] = v; b.classList.toggle("on", v); };
   b.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); b.setPointerCapture(e.pointerId); on(true); });
