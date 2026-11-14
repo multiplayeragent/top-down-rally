@@ -26,6 +26,7 @@
   .card h2 { margin: 0 0 8px; font-size: 22px; }
   .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffd23f; }
   .card ol { margin: 0; padding-left: 24px; font-size: 14px; }
+  .card li.note { list-style: none; margin-left: -24px; } /* a status line, not a numbered entry */
   .card li span { float: right; font-variant-numeric: tabular-nums; }
   .card li.me { color: #ffd23f; font-weight: 700; }
   .card p { margin: 12px 0 0; font-size: 13px; opacity: .8; }
@@ -49,7 +50,7 @@
 <div class="pad" id="padR" hidden><button data-k="brake">BRAKE</button><button data-k="drift">DRIFT</button></div>
 <div id="over" hidden><div class="card">
   <h2 id="overTitle">Results</h2><ol id="results"></ol>
-  <h3 id="boardTitle">Best laps on this track</h3><ol id="board"><li>Loading…</li></ol>
+  <h3 id="boardTitle">Best laps on this track</h3><ol id="board"><li class="note">Loading…</li></ol>
   <p id="next"></p>
 </div></div>
 <script>
@@ -605,13 +606,13 @@ function hud(r) {
 function showBoard() {
   const list = $("board");
   $("boardTitle").textContent = `Best laps on ${TR.def.name}`;
-  if (!player) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  if (!player) { list.innerHTML = "<li class='note'>Leaderboards need a connection.</li>"; return; }
   const board = player.leaderboard(`${CONFIG.board}-${TR.def.key}`);
   const submit = me.best && me.submitted !== me.raceId ? board.submit(Math.max(0, 600000 - me.best)).catch(() => null) : Promise.resolve();
   me.submitted = me.raceId;
   submit.then(() => board.top(10)).then(({ entries }) => {
-    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(600000 - e.score)}</span></li>`).join("") : "<li>No laps yet. Set the first.</li>";
-  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(600000 - e.score)}</span></li>`).join("") : "<li class='note'>No laps yet. Set the first.</li>";
+  }).catch(() => { list.innerHTML = "<li class='note'>Couldn't load the leaderboard.</li>"; });
 }
 
 // ── INPUT ───────────────────────────────────────────────────────────────────────────
